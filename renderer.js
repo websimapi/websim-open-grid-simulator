@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
 import nipplejs from 'nipplejs';
 
 export class WorldRenderer {
@@ -8,14 +9,18 @@ export class WorldRenderer {
         this.chunkManager = chunkManager;
 
         // Constants
-        this.CHUNK_SIZE = 256; // 256 meters
-        this.VIEW_DISTANCE = 3; // How many chunks out to see
+        this.CHUNK_SIZE = 256; 
+        this.VIEW_DISTANCE = 3; 
 
         // State
         this.currentChunk = { x: 0, y: 0 };
-        this.targetPos = new THREE.Vector3(0, 2, 0); // Start slightly above ground
         this.keys = { w: false, a: false, s: false, d: false };
-        this.chunkMeshes = new Map(); // Key "x,y" -> Mesh
+        this.chunkMeshes = new Map(); 
+
+        // Player State
+        this.playerHeight = 1.7; // Human height (meters)
+        this.walkSpeed = 1.4; // Realistic walking speed (m/s)
+        this.velocity = new THREE.Vector3();
 
         this.init();
     }
@@ -24,20 +29,28 @@ export class WorldRenderer {
         // Scene Setup
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x050510);
-        this.scene.fog = new THREE.FogExp2(0x050510, 0.0015);
+        this.scene.fog = new THREE.FogExp2(0x050510, 0.002); // Thicker fog for scale
 
-        // Camera
+        // Camera Rig (for VR compatibility)
+        this.userRig = new THREE.Group();
+        this.userRig.position.set(0, 0, 0);
+        this.scene.add(this.userRig);
+
         this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
-        this.camera.position.set(0, 100, 100);
-        this.camera.lookAt(0, 0, 0);
+        this.camera.position.set(0, this.playerHeight, 0); // Eye level local to rig
+        this.userRig.add(this.camera);
 
         // WebGL Renderer
         this.renderer = new THREE.WebGLRenderer({ antialias: true });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         this.renderer.setPixelRatio(window.devicePixelRatio);
+        this.renderer.xr.enabled = true; // Enable VR
         this.container.appendChild(this.renderer.domElement);
 
-        // Label Renderer (for text over chunks)
+        // VR Button
+        document.body.appendChild(VRButton.createButton(this.renderer));
+
+        // Label Renderer
         this.labelRenderer = new CSS2DRenderer();
         this.labelRenderer.setSize(window.innerWidth, window.innerHeight);
         this.labelRenderer.domElement.style.position = 'absolute';
@@ -45,24 +58,16 @@ export class WorldRenderer {
         this.labelRenderer.domElement.style.pointerEvents = 'none';
         this.container.appendChild(this.labelRenderer.domElement);
 
-        // Lights
-        const ambientLight = new THREE.AmbientLight(0x404040, 2);
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404040, 1.5);
         this.scene.add(ambientLight);
 
         const dirLight = new THREE.DirectionalLight(0xffffff, 1);
         dirLight.position.set(100, 200, 50);
         this.scene.add(dirLight);
 
-        // Avatar (Simple Representation)
-        const geometry = new THREE.CapsuleGeometry(1, 4, 4, 8);
-        const material = new THREE.MeshBasicMaterial({ color: 0x00ffcc, wireframe: true });
-        this.avatar = new THREE.Mesh(geometry, material);
-        this.avatar.position.y = 2;
-        this.scene.add(this.avatar);
-
-        // Grid Helper (Visual floor for context)
-        // Infinite grid illusion handled by moving a large grid helper
-        this.gridHelper = new THREE.GridHelper(2000, 80, 0x333333, 0x111111);
+        // Grid Helper (Visual floor)
+        this.gridHelper = new THREE.GridHelper(2000, 200, 0x333333, 0x111111);
         this.scene.add(this.gridHelper);
 
         // Events
@@ -71,7 +76,9 @@ export class WorldRenderer {
         window.addEventListener('keyup', (e) => this.handleKey(e, false));
 
         this.setupMobileControls();
-        this.animate();
+        
+        // Use setAnimationLoop for VR compatibility
+        this.renderer.setAnimationLoop(this.animate.bind(this));
     }
 
     setupMobileControls() {
@@ -113,18 +120,17 @@ export class WorldRenderer {
         this.labelRenderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    // Core logic to update the scene based on claims
     updateClaims(claims) {
-        // Remove old claim visualizations
+        // Remove old
         this.chunkMeshes.forEach((mesh) => {
             this.scene.remove(mesh);
             if (mesh.userData.label) this.scene.remove(mesh.userData.label);
         });
         this.chunkMeshes.clear();
 
-        // Add new claim visualizations
+        // Add new
         claims.forEach(claim => {
-            const size = this.CHUNK_SIZE - 2; // Slight gap
+            const size = this.CHUNK_SIZE - 2;
             const geometry = new THREE.PlaneGeometry(size, size);
             geometry.rotateX(-Math.PI / 2);
 
@@ -134,25 +140,23 @@ export class WorldRenderer {
                 roughness: 0.8,
                 metalness: 0.2,
                 transparent: true,
-                opacity: 0.8
+                opacity: 0.5,
+                side: THREE.DoubleSide
             });
 
             const mesh = new THREE.Mesh(geometry, material);
 
-            // Position: Center of the chunk
-            // Grid 0,0 is center of world.
-            // Chunk 0,0 spans -128 to 128.
             const xPos = claim.x * this.CHUNK_SIZE;
-            const zPos = claim.y * this.CHUNK_SIZE; // Y in DB is Z in 3D
+            const zPos = claim.y * this.CHUNK_SIZE;
 
-            mesh.position.set(xPos, 0.1, zPos); // Slightly above 0 to avoid z-fighting with grid
+            mesh.position.set(xPos, 0.05, zPos); 
 
-            // Add Label
+            // Label
             const div = document.createElement('div');
             div.className = 'chunk-label';
-            div.innerHTML = `${claim.username}'s Sim<br>(${claim.x}, ${claim.y})`;
+            div.innerHTML = `${claim.username}<br>(${claim.x}, ${claim.y})`;
             const label = new CSS2DObject(div);
-            label.position.set(0, 50, 0);
+            label.position.set(0, 5, 0); // Low label
             mesh.add(label);
             mesh.userData.label = label;
 
@@ -162,52 +166,46 @@ export class WorldRenderer {
     }
 
     movePlayer() {
-        const speed = 2.0; // Meters per tick
-
+        // Determine direction based on camera facing
         const direction = new THREE.Vector3();
-        if (this.keys.w) direction.z -= 1;
-        if (this.keys.s) direction.z += 1;
-        if (this.keys.a) direction.x -= 1;
-        if (this.keys.d) direction.x += 1;
+        
+        // Get forward vector projected on XZ plane
+        const forward = new THREE.Vector3();
+        this.camera.getWorldDirection(forward);
+        forward.y = 0;
+        forward.normalize();
+
+        const right = new THREE.Vector3();
+        right.crossVectors(forward, new THREE.Vector3(0, 1, 0));
+
+        if (this.keys.w) direction.add(forward);
+        if (this.keys.s) direction.sub(forward);
+        if (this.keys.a) direction.sub(right);
+        if (this.keys.d) direction.add(right);
 
         if (direction.length() > 0) {
-            direction.normalize().multiplyScalar(speed);
-            this.targetPos.add(direction);
+            direction.normalize().multiplyScalar(this.walkSpeed);
+            // Move the rig, not the camera (camera moves with head in VR)
+            this.userRig.position.add(new THREE.Vector3(direction.x * 0.016, 0, direction.z * 0.016));
         }
 
-        // Smoothly move avatar to target
-        this.avatar.position.lerp(this.targetPos, 0.1);
-
-        // Camera Follow (Isometric-ish)
-        this.camera.position.x = this.avatar.position.x + 100;
-        this.camera.position.z = this.avatar.position.z + 100;
-        this.camera.position.y = 150;
-        this.camera.lookAt(this.avatar.position);
-
-        // Move infinite grid helper to always be centered on player to create illusion
-        // Snap to grid size to prevent jittering texture
+        // Infinite grid illusion
         const snap = 100;
-        this.gridHelper.position.x = Math.floor(this.avatar.position.x / snap) * snap;
-        this.gridHelper.position.z = Math.floor(this.avatar.position.z / snap) * snap;
+        this.gridHelper.position.x = Math.floor(this.userRig.position.x / snap) * snap;
+        this.gridHelper.position.z = Math.floor(this.userRig.position.z / snap) * snap;
     }
 
     updateStats() {
-        // Calculate current chunk coordinate
-        // Range for chunk 0 is -128 to +128.
-        // Formula: Rounding needs to handle negative numbers correctly for grid coords
-        const cx = Math.floor((this.avatar.position.x + this.CHUNK_SIZE/2) / this.CHUNK_SIZE);
-        const cy = Math.floor((this.avatar.position.z + this.CHUNK_SIZE/2) / this.CHUNK_SIZE);
+        const cx = Math.floor((this.userRig.position.x + this.CHUNK_SIZE/2) / this.CHUNK_SIZE);
+        const cy = Math.floor((this.userRig.position.z + this.CHUNK_SIZE/2) / this.CHUNK_SIZE);
 
         if (cx !== this.currentChunk.x || cy !== this.currentChunk.y) {
             this.currentChunk = { x: cx, y: cy };
         }
-
         return this.currentChunk;
     }
 
     animate() {
-        requestAnimationFrame(this.animate.bind(this));
-
         this.movePlayer();
         this.renderer.render(this.scene, this.camera);
         this.labelRenderer.render(this.scene, this.camera);
