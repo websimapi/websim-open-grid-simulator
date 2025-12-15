@@ -1,0 +1,4 @@
+const hands = [];
+if (vr) {
+  hands.push(this.hand0); // Need to extract world pos inside update?
+}
